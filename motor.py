@@ -372,25 +372,17 @@ def run_dispatch(inputs: dict, params: dict) -> dict:
                         p_min_pu=0.0,
                     )
 
-            # Hidro (energy budget diario)
+            # Hidro (energy budget diario via p_max_pu variable)
             if cap.get("hidro", 0) > 0:
                 hidro_daily_mwh = cap["hidro"] * 8  # 8h equivalentes/día
-                n_days = max(1, len(time_index) // 24)
-                hidro_budget = hidro_daily_mwh * n_days
+                # Distribuimos el budget como factor de disponibilidad máxima
+                hidro_max_pu = min(1.0, hidro_daily_mwh / max(cap["hidro"] * len(time_index), 1))
                 network.add("Generator", f"hidro_{sys}",
                     bus=sys,
                     p_nom=cap["hidro"],
                     marginal_cost=costs.get("hidro", 5),
-                    p_max_pu=1.0,
+                    p_max_pu=hidro_max_pu,
                 )
-                # Budget energético como restricción global
-                if hidro_budget > 0:
-                    network.add("GlobalConstraint", f"hidro_budget_{sys}",
-                        sense="<=",
-                        constant=hidro_budget,
-                        carrier_attribute="",
-                        investment_period_weightings=None,
-                    )
 
             # Solar
             if cap.get("solar", 0) > 0:
@@ -438,9 +430,21 @@ def run_dispatch(inputs: dict, params: dict) -> dict:
             )
 
         # Optimización
-        status = network.optimize(solver_name="highs")
+        try:
+            status = network.optimize(solver_name="highs")
+        except Exception:
+            try:
+                status = network.optimize()
+            except Exception as e2:
+                return {"metadata": {"ok": False, "error": str(e2)}}
 
-        if status[0] not in ("ok", "optimal"):
+        # status puede ser tuple o string según versión PyPSA
+        if isinstance(status, tuple):
+            ok = status[0] in ("ok", "optimal", "warning")
+        else:
+            ok = "ok" in str(status).lower() or "optimal" in str(status).lower()
+
+        if not ok:
             return {"metadata": {"ok": False, "error": f"Solver: {status}"}}
 
         # Extraer resultados
